@@ -1,6 +1,7 @@
 # Ignorar la carpeta de compilación de C++ 
 build/
 .cache/
+.vs/
 
 # Ignorar binarios de Mac/Linux si existen
 *.app/

@@ -118,7 +118,7 @@ DDSPianoAudioProcessor::DDSPianoAudioProcessor()
         }
 
         // 5. REVERB IR (Convolución)
-        juce::File irFile(folderPath + "reverb_ir.wav");
+        juce::File irFile(folderPath + "reverb_ir_44100.wav"); //Probar con reverb_ir_16k
         if (irFile.existsAsFile()) {
             reverb.loadImpulseResponse(irFile, juce::dsp::Convolution::Stereo::yes, juce::dsp::Convolution::Trim::yes, 0);
         }
