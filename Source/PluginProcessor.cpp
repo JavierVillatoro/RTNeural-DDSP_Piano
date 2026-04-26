@@ -37,7 +37,7 @@ DDSPianoAudioProcessor::DDSPianoAudioProcessor()
 {
     for(int i=0; i<MAX_VOICES; ++i) {
         voiceState[i] = VoiceState::Off;
-        smoothAmp[i] = 0.0;
+        lastAmp[i] = 0.0;
         targetAmp[i] = 0.0;
         noiseFilterState[i] = 0.0;
         for(int h=0; h<96; ++h) { 
@@ -199,6 +199,8 @@ void DDSPianoAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
                 if (voiceState[v] != VoiceState::Off) {
                     lastHarmonics[v] = targetHarmonics[v];
 
+                    lastAmp[v] = targetAmp[v];
+
                     alignas(32) double in34[34];
                     in34[0] = voiceMidiNote[v]/127.0; 
                     
@@ -238,7 +240,11 @@ void DDSPianoAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
 
         for (int v = 0; v < MAX_VOICES; ++v) {
             if (voiceState[v] != VoiceState::Off) {
-                smoothAmp[v] += 0.1 * (targetAmp[v] - smoothAmp[v]);
+                //smoothAmp[v] += 0.1 * (targetAmp[v] - smoothAmp[v]);
+
+                double interpAmp = (1.0 - alpha) * lastAmp[v] + alpha * targetAmp[v];
+
+                //double pM = (double)voiceMidiNote[v];
 
                 double pM = (double)voiceMidiNote[v];
                 double f0 = 440.0 * std::pow(2.0, (pM - 69.0) / 12.0);
@@ -268,7 +274,7 @@ void DDSPianoAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
                 noiseFilterState[v] += cutoff * (white - noiseFilterState[v]);
                 
                 // Mezcla de osciladores y ruido
-                outMono += (vAcc + noiseFilterState[v] * (noiseEnergy / 64.0) * 2.0) * smoothAmp[v];
+                outMono += (vAcc + noiseFilterState[v] * (noiseEnergy / 64.0) * 2.0) * interpAmp;
             }
         }
 

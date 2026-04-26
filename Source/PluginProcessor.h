@@ -77,7 +77,7 @@ private:
     
     double globalPedal = 0.0;
     std::array<double, MAX_VOICES> currentAmp;
-    std::array<double, MAX_VOICES> smoothAmp;
+    std::array<double, MAX_VOICES> lastAmp;
     std::array<std::array<double, 96>, MAX_VOICES> currentHarmonics;
 
     // --- VARIABLES PARA INTERPOLACIÓN Y DETUNE ---
