@@ -1,6 +1,7 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include <fstream>
+#include <algorithm>
 #include "../modules/RTNeural/modules/json/json.hpp" 
 
 // ==============================================================================
@@ -40,6 +41,16 @@ DDSPianoAudioProcessor::DDSPianoAudioProcessor()
         lastAmp[i] = 0.0;
         targetAmp[i] = 0.0;
         noiseFilterState[i] = 0.0;
+        releaseTimer[i] = 0.0;
+        voiceMidiNote[i] = 0;
+        voiceVelocity[i] = 0.0;
+        
+        noiseOLA_WritePos[i] = 0;
+        noiseReadPos[i] = 0.0;
+        for(int n=0; n<256; ++n) {
+            noiseOLA_Buffer[i][n] = 0.0f;
+        }
+
         for(int h=0; h<96; ++h) { 
             oscPhases[i][h] = 0.0; 
             oscPhases2[i][h] = 0.0; 
@@ -73,8 +84,8 @@ DDSPianoAudioProcessor::DDSPianoAudioProcessor()
             auto wGru = to2DNormal(j.at("gru").at("kernel"), 128, 576);
             auto uGru = to2DNormal(j.at("gru").at("recurrent_kernel"), 192, 576);
             auto bGru = j.at("gru").at("bias").get<std::vector<double>>();
-            std::vector<std::vector<double>> bGru2D = { std::vector<double>(bGru.begin(), bGru.begin()+576) };
-            if(bGru.size() > 576) bGru2D.push_back(std::vector<double>(bGru.begin()+576, bGru.end()));
+            std::vector<std::vector<double>> bGru2D = { std::vector<double>(bGru.begin(), bGru.begin() + 576) };
+            if(bGru.size() > 576) bGru2D.push_back(std::vector<double>(bGru.begin() + 576, bGru.end()));
             auto wHid = transposeToRTNeural(j.at("dense_hidden").at("kernel"), 192, 192);
             auto bHid = j.at("dense_hidden").at("bias").get<std::vector<double>>();
             auto wAmp = transposeToRTNeural(j.at("amp_out").at("kernel"), 192, 1);
@@ -101,12 +112,21 @@ DDSPianoAudioProcessor::DDSPianoAudioProcessor()
             }
         }
 
-        // 3. DETUNER
+        // 3. DETUNER (Mantenemos tu corrección del Bias que era perfecta)
         std::ifstream detS(folderPath.toStdString() + "detuner_weights.json");
         if (detS.is_open()) {
             nlohmann::json j; detS >> j;
             auto wDet = transposeToRTNeural(j.at("dense").at("kernel"), 1, 1);
-            for (int v = 0; v < MAX_VOICES; ++v) vocesDetuner[v].get<0>().setWeights(wDet);
+            auto bDet = j.at("dense").at("bias").get<std::vector<double>>(); 
+            
+            if (j.contains("static_detune")) {
+                static_detune_val = j["static_detune"]; 
+            }
+            
+            for (int v = 0; v < MAX_VOICES; ++v) {
+                vocesDetuner[v].get<0>().setWeights(wDet);
+                vocesDetuner[v].get<0>().setBias(bDet.data());
+            }
         }
 
         // 4. INHARMONICITY (Pesos reales)
@@ -118,7 +138,7 @@ DDSPianoAudioProcessor::DDSPianoAudioProcessor()
         }
 
         // 5. REVERB IR (Convolución)
-        juce::File irFile(folderPath + "reverb_ir_44100.wav"); //Probar con reverb_ir_16k
+        juce::File irFile(folderPath + "reverb_ir_44100.wav"); 
         if (irFile.existsAsFile()) {
             reverb.loadImpulseResponse(irFile, juce::dsp::Convolution::Stereo::yes, juce::dsp::Convolution::Trim::yes, 0);
         }
@@ -132,14 +152,20 @@ void DDSPianoAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     sampleRateC = sampleRate;
     muestrasPorFrameNeuronal = 250.0 / sampleRate;
     acumuladorFase = 0.0;
+    
+    samplesPerNeuralFrame  = (int)(sampleRate / 250.0 + 0.5); 
+    samplesSinceLastFrame  = 0;
+
     redContextoGlobal.reset();
     
     for (int v = 0; v < MAX_VOICES; ++v) {
         vocesTronco[v].reset();
         noiseFilterState[v] = 0.0;
+        noiseOLA_WritePos[v] = 0;
+        noiseReadPos[v] = 0.0;
+        for(int n=0; n<256; ++n) noiseOLA_Buffer[v][n] = 0.0f;
     }
     
-    // Preparar el motor de convolución (Reverb)
     juce::dsp::ProcessSpec spec;
     spec.sampleRate = sampleRate;
     spec.maximumBlockSize = samplesPerBlock;
@@ -154,7 +180,9 @@ void DDSPianoAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     auto* channelDataL = buffer.getWritePointer(0);
     auto* channelDataR = buffer.getWritePointer(1);
 
-    // 1. GESTIÓN MIDI CON ESTADOS
+    // ==============================================================================
+    // 1. GESTIÓN MIDI
+    // ==============================================================================
     for (const auto metadata : midiMessages) {
         auto msg = metadata.getMessage();
         if (msg.isNoteOn()) {
@@ -163,14 +191,28 @@ void DDSPianoAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
                     voiceMidiNote[v] = msg.getNoteNumber();
                     voiceVelocity[v] = msg.getFloatVelocity();
                     voiceState[v] = VoiceState::NoteOn;
+                    releaseTimer[v] = 0.0; 
+                    
+                    // DE VUELTA EL SALVADOR: Borramos la memoria corrupta para tener ataque fresco.
                     vocesTronco[v].reset(); 
+                    
+                    noiseOLA_WritePos[v] = 0;
+                    noiseReadPos[v] = 0.0;
+                    for(int n=0; n<256; ++n) noiseOLA_Buffer[v][n] = 0.0f;
+                    // --- NUEVO: (EL PUNCH DEL MARTILLO) ---
+                    for(int h=0; h<96; ++h) {
+                        oscPhases[v][h] = 0.0;
+                        oscPhases2[v][h] = 0.0;
+                    }
+
                     break;
                 }
             }
         } else if (msg.isNoteOff()) {
             for (int v = 0; v < MAX_VOICES; ++v) {
                 if (voiceState[v] == VoiceState::NoteOn && voiceMidiNote[v] == msg.getNoteNumber()) {
-                    voiceState[v] = VoiceState::Releasing; // Nota soltada
+                    voiceState[v] = VoiceState::Releasing; 
+                    // NO forzamos la velocity a 0 aquí. Dejamos que decaiga sola.
                 }
             }
         } else if (msg.isController() && msg.getControllerNumber() == 64) {
@@ -178,12 +220,21 @@ void DDSPianoAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         }
     }
 
+    // ==============================================================================
     // 2. BUCLE PRINCIPAL DE SÍNTESIS
+    // ==============================================================================
+    const double noisePhaseInc = 16000.0 / sampleRateC;
+    const double nyquist       = 8000.0; 
+    const double rolloffStart  = nyquist * 0.75; 
+    const double twoPi         = juce::MathConstants<double>::twoPi;
+    const double pi            = juce::MathConstants<double>::pi;
+
     for (int i = 0; i < numSamples; ++i) {
         acumuladorFase += muestrasPorFrameNeuronal;
         
         if (acumuladorFase >= 1.0) {
             acumuladorFase -= 1.0;
+            samplesSinceLastFrame = 0; 
             
             double sV=0, sP=0; int cnt=0;
             for(int v=0; v<MAX_VOICES; v++) {
@@ -197,15 +248,17 @@ void DDSPianoAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
 
             for (int v = 0; v < MAX_VOICES; ++v) {
                 if (voiceState[v] != VoiceState::Off) {
+                    
                     lastHarmonics[v] = targetHarmonics[v];
-
                     lastAmp[v] = targetAmp[v];
 
                     alignas(32) double in34[34];
                     in34[0] = voiceMidiNote[v]/127.0; 
                     
-                    // Decaimiento natural al soltar la tecla
-                    if (voiceState[v] == VoiceState::Releasing) voiceVelocity[v] *= 0.95; 
+                    // EL AMORTIGUADOR MECÁNICO DE LA TECLA: Protege a la GRU del shock
+                    if (voiceState[v] == VoiceState::Releasing) {
+                        voiceVelocity[v] *= 0.95; 
+                    }
                     
                     in34[1] = voiceVelocity[v];
                     for(int c=0; c<32; c++) in34[2+c] = cOut[c];
@@ -216,7 +269,6 @@ void DDSPianoAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
                     vocesAmp[v].forward(tOut);
                     targetAmp[v] = modifiedSigmoid(vocesAmp[v].getOutputs()[0]);
 
-                    // Kill switch si la nota ya se apagó
                     if (voiceState[v] == VoiceState::Releasing && targetAmp[v] < 0.001) {
                         voiceState[v] = VoiceState::Off;
                         targetAmp[v] = 0.0;
@@ -228,69 +280,124 @@ void DDSPianoAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
                     for(int h=0; h<96; h++){ targetHarmonics[v][h] = modifiedSigmoid(rH[h]); sH += targetHarmonics[v][h]; }
                     for(int h=0; h<96; h++) targetHarmonics[v][h] /= (sH + 1e-7);
 
+                    // ===================================================
+                    // MOTOR STFT FASE 3 (LIMPIO Y NATIVO PARA JUCE)
+                    // ===================================================
                     vocesNoise[v].forward(tOut);
                     const double* rN = vocesNoise[v].getOutputs();
-                    for(int n=0; n<64; n++) currentNoiseMags[v][n] = modifiedSigmoid(rN[n]);
+                    
+                    float fftData[256] = {0.0f}; 
+                    
+                    for (int k = 0; k < 128; ++k) fftData[k] = (float)(randomSource.nextDouble() * 2.0 - 1.0);
+                    fftEngine.performRealOnlyForwardTransform(fftData, true);
+                    
+                    // Empaquetado directo JUCE: data[0] DC, data[1] Nyquist, resto Re/Im intercalado.
+                    for(int k=0; k<64; k++) {
+                        float mag = (float)modifiedSigmoid(rN[k]);
+                        fftData[k*2] *= mag;     
+                        fftData[k*2+1] *= mag;   
+                    }
+                    fftData[1] = 0.0f; // Evita pitidos anulando Nyquist puro
+                    
+                    fftEngine.performRealOnlyInverseTransform(fftData);
+                    
+                    for (int n = 0; n < 128; ++n) {
+                        int rolledIdx = (n + 64) % 128; // Roll
+                        float sample = fftData[rolledIdx] / 128.0f; // Normalización FFT C++
+                        float window = 0.5f * (1.0f - std::cos(2.0f * juce::MathConstants<float>::pi * n / 127.0f));
+                        int writeIdx = (noiseOLA_WritePos[v] + n) % 256;
+                        noiseOLA_Buffer[v][writeIdx] += sample * window;
+                    }
+                    noiseOLA_WritePos[v] = (noiseOLA_WritePos[v] + 64) % 256;
                 }
             }
         }
+
+        double alpha = (double)samplesSinceLastFrame / (double)samplesPerNeuralFrame;
+        alpha = std::min(alpha, 1.0);
+        ++samplesSinceLastFrame;
 
         double outMono = 0.0;
-        double alpha = acumuladorFase;
 
         for (int v = 0; v < MAX_VOICES; ++v) {
-            if (voiceState[v] != VoiceState::Off) {
-                //smoothAmp[v] += 0.1 * (targetAmp[v] - smoothAmp[v]);
+            if (voiceState[v] == VoiceState::Off) continue;
 
-                double interpAmp = (1.0 - alpha) * lastAmp[v] + alpha * targetAmp[v];
+            double releaseEnvelope = 1.0;
+            if (voiceState[v] == VoiceState::Releasing) {
+                releaseTimer[v] += 1.0 / sampleRateC;
+                releaseEnvelope = std::max(0.0, 1.0 - releaseTimer[v]);
+                if (releaseEnvelope <= 0.0) {
+                    voiceState[v] = VoiceState::Off;
+                    continue;
+                }
+            }
 
-                //double pM = (double)voiceMidiNote[v];
+            double interpAmp = (1.0 - alpha) * lastAmp[v] + alpha * targetAmp[v];
+            double vAcc = 0.0; 
 
+            // ARMÓNICOS
+            if (interpAmp > 0.0001) {
                 double pM = (double)voiceMidiNote[v];
                 double f0 = 440.0 * std::pow(2.0, (pM - 69.0) / 12.0);
+                
+                alignas(32) double dIn = pM / 127.0;
+                vocesDetuner[v].forward(&dIn);
+                double detVal = std::tanh(vocesDetuner[v].getOutputs()[0]) + std::tanh(static_detune_val);
+                double f0_2 = f0 * std::pow(2.0, detVal / 12.0);
+                
                 double B = std::exp(alpha_T * pM + beta_T) + std::exp(alpha_B * pM + beta_B);
 
-                double vAcc = 0;
                 for (int k = 1; k <= 96; ++k) {
-                    double fk = f0 * k * std::sqrt(1.0 + B*k*k);
-                    // Límite de 8kHz (Nyquist de tu modelo en Python)
-                    if (fk < 8000.0) {
-                        oscPhases[v][k-1] = std::fmod(oscPhases[v][k-1] + (fk*6.283185/sampleRateC), 6.283185);
-                        double h = (1.0 - alpha) * lastHarmonics[v][k-1] + alpha * targetHarmonics[v][k-1];
-                        vAcc += std::sin(oscPhases[v][k-1]) * h;
+                    double str = std::sqrt(1.0 + B*k*k);
+                    double fk1 = f0 * k * str;
+                    double fk2 = f0_2 * k * str;
+                    
+                    // ANTI-ALIASING CONSERVANTE DE AGUDOS (Mantuvimos tu código que era excelente)
+                    double limitMult = 1.0;
+                    if (fk1 >= nyquist) {
+                        limitMult = 0.0;
+                    } else if (fk1 > rolloffStart) {
+                        double t = (fk1 - rolloffStart) / (nyquist - rolloffStart);
+                        limitMult = 0.5 * (1.0 + std::cos(pi * t));
+                    }
+
+                    if (limitMult > 0.0 && fk1 < nyquist) {
+                        oscPhases[v][k-1] = std::fmod(oscPhases[v][k-1] + (fk1*twoPi/sampleRateC), twoPi);
+                        oscPhases2[v][k-1] = std::fmod(oscPhases2[v][k-1] + (fk2*twoPi/sampleRateC), twoPi);
+                        
+                        double h = ((1.0 - alpha) * lastHarmonics[v][k-1] + alpha * targetHarmonics[v][k-1]) * limitMult;
+                        vAcc += (std::sin(oscPhases[v][k-1]) + std::sin(oscPhases2[v][k-1])) * h * 0.5;
                     }
                 }
-                
-                // Ruido Filtrado (IIR)
-                double white = randomSource.nextDouble() * 2.0 - 1.0;
-                double noiseEnergy = 0.0;
-                for(int n=0; n<64; n++) noiseEnergy += currentNoiseMags[v][n];
-                
-                double cutoff = 0.05; 
-                if (currentNoiseMags[v][0] > 0.001) cutoff = currentNoiseMags[v][10] / currentNoiseMags[v][0];
-                if (cutoff > 0.8) cutoff = 0.8;
-                if (cutoff < 0.01) cutoff = 0.01;
-
-                noiseFilterState[v] += cutoff * (white - noiseFilterState[v]);
-                
-                // Mezcla de osciladores y ruido
-                outMono += (vAcc + noiseFilterState[v] * (noiseEnergy / 64.0) * 2.0) * interpAmp;
             }
+            
+            // RUIDO
+            int idx1 = (int)noiseReadPos[v];
+            int idx2 = (idx1 + 1) % 256;
+            double frac = noiseReadPos[v] - idx1;
+            
+            double nSig = noiseOLA_Buffer[v][idx1] * (1.0 - frac) + noiseOLA_Buffer[v][idx2] * frac;
+            
+            double nextReadPos = noiseReadPos[v] + noisePhaseInc;
+            if ((int)nextReadPos != idx1) noiseOLA_Buffer[v][idx1] = 0.0f;
+            noiseReadPos[v] = std::fmod(nextReadPos, 256.0);
+            
+            // Mezclamos (Nota: Multiplico nSig por interpAmp aquí para que corte la resonancia excesiva)
+            outMono += (vAcc + nSig * 0.4) * interpAmp * releaseEnvelope;
         }
 
-        // Ganancia Pre-Reverb
         outMono *= 0.15; 
         outMono = std::tanh(outMono);
         channelDataL[i] = (float)outMono; 
         channelDataR[i] = (float)outMono;
     }
 
-    // --- 3. PROCESAMIENTO DE REVERB (Convolución JUCE) ---
+    // ==============================================================================
+    // 3. REVERB
+    // ==============================================================================
     juce::dsp::AudioBlock<float> block(buffer);
     juce::dsp::ProcessContextReplacing<float> context(block);
     reverb.process(context);
-
-    // Ajuste maestro post-reverb
     buffer.applyGain(0.7f);
 }
 

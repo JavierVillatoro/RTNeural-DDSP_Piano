@@ -76,29 +76,41 @@ private:
     std::array<double, MAX_VOICES> voiceVelocity;
     
     double globalPedal = 0.0;
-    std::array<double, MAX_VOICES> currentAmp;
+    
+    // --- FASE 2: INTERPOLACIÓN Y DINÁMICA ---
+    std::array<double, MAX_VOICES> targetAmp;
     std::array<double, MAX_VOICES> lastAmp;
     std::array<std::array<double, 96>, MAX_VOICES> currentHarmonics;
-
-    // --- VARIABLES PARA INTERPOLACIÓN Y DETUNE ---
-    std::array<double, MAX_VOICES> targetAmp;
     std::array<std::array<double, 96>, MAX_VOICES> targetHarmonics;
     std::array<std::array<double, 96>, MAX_VOICES> lastHarmonics;
     std::array<std::array<double, 96>, MAX_VOICES> oscPhases; 
     std::array<std::array<double, 96>, MAX_VOICES> oscPhases2;
 
-    // --- VARIABLES PARA RUIDO FILTRADO ---
+    // --- FASE 3: MOTOR STFT Y RUIDO RESAMPLEADO ---
+    juce::dsp::FFT fftEngine { 7 }; 
     std::array<std::array<double, 64>, MAX_VOICES> currentNoiseMags;
     juce::Random randomSource;
-    std::array<double, MAX_VOICES> noiseFilterState;
+    std::array<double, MAX_VOICES> noiseFilterState; 
+    
+    std::array<std::array<float, 256>, MAX_VOICES> noiseOLA_Buffer; 
+    std::array<int, MAX_VOICES> noiseOLA_WritePos;
+    std::array<double, MAX_VOICES> noiseReadPos;
 
     // --- MÁQUINA DE ESTADOS MIDI ---
     enum class VoiceState { Off, NoteOn, Releasing };
     std::array<VoiceState, MAX_VOICES> voiceState;
+    std::array<double, MAX_VOICES> releaseTimer;
+    
+    // ¡AQUÍ ESTÁ TU VARIABLE FALTANTE!
+    std::array<int, MAX_VOICES> silentFrames;
 
     // --- FÍSICA Y ESPACIO (INHARMONICITY & REVERB) ---
     double alpha_B = 0.0, beta_B = 0.0, alpha_T = 0.0, beta_T = 0.0;
+    double static_detune_val = 0.0;
     juce::dsp::Convolution reverb;
+
+    int samplesSinceLastFrame = 0;
+    int samplesPerNeuralFrame  = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DDSPianoAudioProcessor)
 };
