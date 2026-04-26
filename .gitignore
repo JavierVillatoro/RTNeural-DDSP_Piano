@@ -1,0 +1,23 @@
+# Ignorar la carpeta de compilación de C++ 
+build/
+.cache/
+
+# Ignorar binarios de Mac/Linux si existen
+*.app/
+*.dmg
+*.so
+*.dylib
+
+# Opcional: Ignorar los pesos JSON si superan los 50MB
+# (Es mejor subirlos a un Google Drive/Kaggle y poner el link en el README)
+training/rtneural_export/*.json
+
+# Ignorar entornos virtuales de Python
+env/
+venv/
+.venv/
+__pycache__/
+
+# Ignorar archivos temporales del SO
+.DS_Store
+Thumbs.db

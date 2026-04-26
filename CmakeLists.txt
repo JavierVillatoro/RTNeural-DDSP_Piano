@@ -1,0 +1,78 @@
+cmake_minimum_required(VERSION 3.15)
+
+# Nombre de tu VST
+project(DDSPiano VERSION 1.0.0)
+
+# ==============================================================================
+# 1. INICIALIZACIÓN DE JUCE
+# ==============================================================================
+# Añadimos la carpeta de JUCE al proyecto
+add_subdirectory(modules/JUCE)
+
+# Creamos el objetivo del plugin. Aquí le decimos a JUCE qué formatos queremos.
+juce_add_plugin(DDSPiano
+    IS_SYNTH TRUE                       # ¡CRÍTICO! Es un instrumento, no un efecto.
+    NEEDS_MIDI_INPUT TRUE               # Necesitamos recibir notas del teclado.
+    NEEDS_MIDI_OUTPUT FALSE
+    IS_MIDI_EFFECT FALSE
+    FORMATS VST3 AU Standalone          # Formatos a compilar
+    PRODUCT_NAME "DDSPiano"
+    PLUGIN_CODE "Ddsp"                  # Un código de 4 letras único para tu plugin
+    PLUGIN_MANUFACTURER_CODE "Manu"     # Código de 4 letras de tu "empresa"
+    VST3_AUTO_ASSIGN_VST2_IDS FALSE
+)
+
+juce_generate_juce_header(DDSPiano)
+
+# ==============================================================================
+# 2. CONFIGURACIÓN DE RTNEURAL (El Cerebro)
+# ==============================================================================
+# Aquí configuramos el motor matemático antes de cargar RTNeural.
+# Como tienes una GRU de 192 unidades, EIGEN es probablemente la mejor opción.
+# Si luego quieres probar XSIMD, pones EIGEN en OFF y XSIMD en ON.
+
+set(RTNEURAL_EIGEN ON CACHE BOOL "Usa Eigen backend" FORCE)
+set(RTNEURAL_XSIMD OFF CACHE BOOL "Usa XSIMD backend" FORCE)
+set(RTNEURAL_STL OFF CACHE BOOL "Usa STL backend" FORCE)
+
+# Añadimos la librería RTNeural al proyecto
+add_subdirectory(modules/RTNeural)
+
+# ==============================================================================
+# 3. CÓDIGO FUENTE Y ENLAZADO (Linking)
+# ==============================================================================
+# Le decimos a CMake dónde están nuestros archivos .cpp y .h
+target_sources(DDSPiano PRIVATE
+    Source/PluginProcessor.cpp
+    Source/PluginEditor.cpp
+)
+
+# Vinculamos nuestro plugin con los módulos de JUCE necesarios y con RTNeural
+target_link_libraries(DDSPiano PRIVATE
+    juce::juce_audio_utils
+    juce::juce_dsp        # Vital para usar la Reverb de convolución
+    RTNeural              # ¡El puente de oro!
+)
+
+# --- LÍNEA NUEVA: Rutas absolutas a prueba de fallos ---
+target_include_directories(DDSPiano PRIVATE 
+    "${CMAKE_CURRENT_SOURCE_DIR}/modules/RTNeural/modules/json/single_include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/modules/RTNeural/modules/json/include"
+)
+
+# Configuramos el estándar de C++ (RTNeural requiere C++17 o superior)
+target_compile_features(DDSPiano PRIVATE cxx_std_17)
+
+
+# --- PERMITIR REDES GRANDES Y APAGAR EL ERROR DE VST2 ---
+target_compile_definitions(DDSPiano PUBLIC 
+    EIGEN_STACK_ALLOCATION_LIMIT=0
+    JUCE_VST3_CAN_REPLACE_VST2=0
+)
+
+# Opcional pero recomendado: Avisos de compilación estrictos para evitar bugs
+if (MSVC)
+    target_compile_options(DDSPiano PRIVATE /W4)
+else()
+    target_compile_options(DDSPiano PRIVATE -Wall -Wextra)
+endif()

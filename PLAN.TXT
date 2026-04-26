@@ -1,0 +1,19 @@
+1_Definir Cmakelists.txt 
+    - incluir JUCE
+    - compilar RTNeural como librería estática.
+    - compile time api
+    - configurar flags del preprocesador necesarias para activar motores de calculo
+        RTNeural_Eigin // RTNeural_XSIMD
+
+2_Arquitectura estática (Header.h)
+    - dimensiones de Json (GRU 192... y Dense...) #Rellenar aqui 
+    - traducir a sintaxis RTNeural::ModelT<....>
+    - cumplir zero dynamic allocation , prohibido usar malloc , new , std::vector. preasignar en preparetoplay
+    - estructura para polifonia
+
+3_Reloj Neuronal (no usar processblock de JUCE ???) 
+    - bucle de audio en C++ con acumulador de fase fraccional
+    - desacoplar reloj interno de red neuronal del reloj de interfaz de audio del DAW
+    - cuidado con problema sincronizacion
+    44100/250 --- 176,4 muestras --- no puedo procesar , 
+    Solucion ----> Acumulacion, Disparo, Residuo
