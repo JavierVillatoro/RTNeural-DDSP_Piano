@@ -22,3 +22,6 @@ __pycache__/
 # Ignorar archivos temporales del SO
 .DS_Store
 Thumbs.db
+# Salidas de compilacion de pruebas
+build_tools/
+build_plugin.log

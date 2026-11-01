@@ -1,0 +1,61 @@
+name: Build DDSPiano (Windows / macOS / Linux)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: Windows
+          - os: macos-latest
+            name: macOS
+          - os: ubuntu-latest
+            name: Linux
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Dependencias de Linux (JUCE)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libjack-jackd2-dev ladspa-sdk libfreetype-dev \
+            libx11-dev libxcomposite-dev libxcursor-dev libxext-dev libxinerama-dev libxrandr-dev \
+            libxrender-dev libglu1-mesa-dev mesa-common-dev
+
+      - name: Configurar
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Compilar
+        run: cmake --build build --config Release --parallel 4
+
+      - name: Prueba de oro (RTNeural == Keras)
+        shell: bash
+        run: |
+          EXE=$(find build -name "ddsp_render*" -type f -perm -u+x | head -1)
+          [ -z "$EXE" ] && EXE=$(find build -name "ddsp_render.exe" | head -1)
+          "$EXE" golden Resources/golden_v6.bin Resources/ddsp_weights_v6.bin
+          "$EXE" golden Resources/golden_v8.bin Resources/ddsp_weights_v8.bin
+
+      - name: Subir plugin
+        uses: actions/upload-artifact@v4
+        with:
+          name: DDSPiano-${{ matrix.name }}
+          path: |
+            build/DDSPiano_artefacts/Release/VST3
+            build/DDSPiano_artefacts/Release/AU
+            build/DDSPiano_artefacts/Release/Standalone
+            build/DDSPiano_artefacts/VST3
+            build/DDSPiano_artefacts/AU
+            build/DDSPiano_artefacts/Standalone
+          if-no-files-found: warn
