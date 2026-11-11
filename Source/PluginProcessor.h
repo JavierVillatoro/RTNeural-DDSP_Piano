@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "DDSPEngine.h"
+#include "VelocityCurve.h"
 
 // ==============================================================================
 // Procesador del plugin: solo traduce MIDI/parametros de JUCE al motor ddsp::Engine
@@ -56,6 +57,13 @@ public:
     std::atomic<int>  activeVoices { 0 };
     std::atomic<bool> sustainDown { false };
     std::atomic<int>  activeModelUI { 1 };
+    std::atomic<int>  lastVelIn { 0 }, lastVelOut { 0 };   // ultima nota: velocity del teclado -> velocity que recibe el modelo (0..127)
+    std::atomic<int>  peakVelIn { 0 };                     // velocity maxima del teclado desde la ultima calibracion
+
+    /** Curva de velocity con los parametros actuales (Vel Max, Touch, Dynamics, Compensar) para el modelo dado. */
+    ddsp::VelocityCurve currentVelocityCurve (int model) const noexcept;
+    /** Pone "Vel Max" en la velocity mas alta que ha tocado el usuario y reinicia el pico. Devuelve false si aun no hay datos. */
+    bool calibrateVelMax();
 
     /** Modelo elegido en el selector (0 = v6, 1 = v8). */
     int getSelectedModel() const noexcept;
@@ -74,7 +82,8 @@ private:
     std::array<juce::dsp::Convolution, kModels> reverb;
     juce::dsp::DryWetMixer<float> mixer;
     juce::AudioBuffer<float> revBuf, wetSum;
-    std::vector<float> mono;
+    std::vector<float> mono, monoR;   // salida del motor: canal izquierdo y derecho (sin reverb)
+    juce::SmoothedValue<float> widthSmooth;
 
     // solo hilo de audio
     bool lastVirtualSustain = false;
@@ -89,6 +98,19 @@ private:
     std::atomic<float>* pModel = nullptr;
     std::atomic<float>* pNoise = nullptr;
     std::atomic<float>* pNoiseExt = nullptr;
+    std::atomic<float>* pVelMax = nullptr;
+    std::atomic<float>* pTouch = nullptr;
+    std::atomic<float>* pDynamics = nullptr;
+    std::atomic<float>* pVelComp = nullptr;
+    std::atomic<float>* pTranspose = nullptr;
+    std::atomic<float>* pHumanize = nullptr;
+    std::atomic<float>* pUnison = nullptr;
+    std::atomic<float>* pWidth = nullptr;
+
+    // Transposicion: nota que suena realmente por cada tecla pulsada (-1 = ninguna). El note-off usa esta tabla,
+    // asi cambiar Transpose con notas pulsadas no deja ninguna colgada.
+    std::array<int, 128> soundingNote;
+    void clearSoundingNotes() noexcept { soundingNote.fill (-1); }
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DDSPianoAudioProcessor)
 };

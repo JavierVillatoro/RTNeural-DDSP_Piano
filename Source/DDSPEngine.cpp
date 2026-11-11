@@ -224,6 +224,7 @@ void Engine::zeroState()
         v.retire = false;
     }
     std::memset (ring, 0, sizeof (ring));
+    std::memset (ringR, 0, sizeof (ringR));
     noiseRead = 0.0;
     frameIndex = 0;
     tickCount = 0;
@@ -306,21 +307,39 @@ int Engine::allocateVoice()
     return idx;
 }
 
-void Engine::setupPartials (Voice& v)
+void Engine::setupPartials (Voice& v, float tune, float w2, float det2, float colour)
 {
     const double p = (double) v.note;
-    const double f0 = 440.0 * std::pow (2.0, (p - 69.0) / 12.0);
+    const double f0 = 440.0 * std::pow (2.0, (p - 69.0) / 12.0) * (double) tune;
     const double B = std::exp ((double) alphaT * p + (double) betaT) + std::exp ((double) alphaB * p + (double) betaB);
 
-    const double maxDetune = std::pow (2.0, std::max (detuneCents[0], detuneCents[1]) / 1200.0);
+    // Cuerdas de la nota: las del modelo, o 2 si se anade la segunda cuerda del unison (solo con modelos de 1 cuerda).
+    // ratio[s] = factor de frecuencia de la cuerda; wgt[s] = su peso en amplitud.
+    const int nStr = (w2 > 0.f && nStrings == 1) ? 2 : nStrings;
+    double ratio[kStrings] { 1.0, 1.0 };
+    float  wgt[kStrings] { 1.f, 1.f };
+    if (nStr == 2 && nStrings == 1)
+    {
+        // Peso total con la misma potencia media que una sola cuerda (el batido sube y baja el nivel, la media se conserva)
+        const float comp = 1.f / std::sqrt ((1.f - w2) * (1.f - w2) + w2 * w2);
+        ratio[1] = (double) det2;
+        wgt[0] = comp * (1.f - w2);
+        wgt[1] = comp * w2;
+    }
+    else
+        for (int s = 0; s < nStr; ++s)
+            ratio[s] = std::pow (2.0, (double) detuneCents[s] / 1200.0);
+
+    const double maxRatio = std::max (ratio[0], ratio[1]);
     int nAct = 0;
     for (int k = 1; k <= kHarm; ++k)
     {
-        const double fk = f0 * k * std::sqrt (1.0 + B * k * k) * maxDetune;
+        const double fk = f0 * k * std::sqrt (1.0 + B * k * k) * maxRatio;
         if (fk < (double) cutoffHz) nAct = k; else break;
     }
     v.nAct = nAct;
-    v.nPart = nAct * nStrings;
+    v.nStr = nStr;
+    v.nPart = nAct * nStr;
     v.nPartPad = (v.nPart + 3) & ~3;
 
     for (int j = 0; j < kPartials; ++j)
@@ -328,23 +347,47 @@ void Engine::setupPartials (Voice& v)
         v.cr[j] = 1.f; v.ci[j] = 0.f; v.rc[j] = 1.f; v.rs[j] = 0.f;
         v.g[j] = 0.f; v.dg[j] = 0.f; v.target[j] = 0.f; v.mask[j] = 0.f;
     }
-    for (int s = 0; s < nStrings; ++s)
+    float hueGain[kHarm];   // "color" estatico de cada parcial para esta nota (1 = sin variar)
+    for (int k = 0; k < kHarm; ++k)
+        hueGain[k] = colour > 0.f ? 1.f + colour * uniform() : 1.f;
+    for (int s = 0; s < nStr; ++s)
     {
-        const double detune = std::pow (2.0, (double) detuneCents[s] / 1200.0);
         for (int k = 1; k <= nAct; ++k)
         {
             const int j = s * nAct + (k - 1);
-            const double fk = f0 * k * std::sqrt (1.0 + B * k * k) * detune;
+            const double fk = f0 * k * std::sqrt (1.0 + B * k * k) * ratio[s];
             const double w = 2.0 * kPi * fk / sr;
             v.rc[j] = (float) std::cos (w);
             v.rs[j] = (float) std::sin (w);
-            v.mask[j] = fk < (double) cutoffHz ? 1.f : 0.f;
+            v.mask[j] = fk < (double) cutoffHz ? wgt[s] * hueGain[k - 1] : 0.f;
         }
     }
 }
 
 void Engine::startVoice (int idx, int note, float vel)
 {
+    // Variacion entre notas: se sortea UNA vez aqui (nada cuesta en el hilo de audio por muestra). Si esta desactivada
+    // no se consume el generador de ruido, asi el audio es identico bit a bit al de antes.
+    float tune = 1.f, w2 = 0.f, det2 = 1.f, colour = 0.f;
+    if (humanize > 0.f && vel > 0.f)
+    {
+        vel = std::clamp (vel * (1.f + 0.06f * humanize * uniform()), 0.f, 1.f);
+        tune = std::exp2 (2.0f * humanize * uniform() / 1200.f);          // ±2 cents
+        colour = 0.08f * humanize;                                         // ±0,7 dB por parcial
+    }
+    if (unison > 0.f && nStrings == 1)
+    {
+        const float reg = std::clamp (((float) note - 30.f) / 18.f, 0.f, 1.f);   // 0 en los bajos (1 cuerda) -> 1 desde la nota 48
+        w2 = 0.4f * unison * reg;
+        if (w2 > 0.02f)
+        {
+            const float cents = 0.8f + 1.7f * (0.5f + 0.5f * uniform());          // 0,8 .. 2,5 cents
+            det2 = std::exp2 ((uniform() < 0.f ? -cents : cents) / 1200.f);
+        }
+        else
+            w2 = 0.f;
+    }
+
     auto& v = voices[(size_t) idx];
     v.state = State::Held;
     v.retire = false;
@@ -358,7 +401,7 @@ void Engine::startVoice (int idx, int note, float vel)
     for (auto& p : v.noisePow) p = 0.f;
     v.order = ++orderCounter;
     fast.copyState (idx, FastCore::kIdle);   // estado GRU inicial = voz en reposo, como en el entrenamiento
-    setupPartials (v);
+    setupPartials (v, tune, w2, det2, colour);
 }
 
 void Engine::noteOn (int note, float velocity01)
@@ -442,7 +485,16 @@ void Engine::fft (float* re, float* im, bool inverse) const
     }
 }
 
-float Engine::noiseSample (double pos) const noexcept
+// Ganancias L/R de una voz segun su nota: ley de potencia constante normalizada (centro = 1 en cada canal).
+void Engine::panGains (int note, float& gl, float& gr) noexcept
+{
+    const float p = std::clamp (kMaxPan * ((float) note - 64.5f) / 43.5f, -1.f, 1.f);
+    const float th = (p + 1.f) * 0.78539816f;   // (p+1)*pi/4
+    gl = 1.41421356f * std::cos (th);
+    gr = 1.41421356f * std::sin (th);
+}
+
+float Engine::noiseSampleFrom (const float* ring, double pos) const noexcept
 {
     const double fl = std::floor (pos);
     const float t = (float) (pos - fl);
@@ -601,7 +653,7 @@ void Engine::neuralTick()
         float sum = 0.f;
         for (int kk = 0; kk < kHarm; ++kk) { harm[kk] = modifiedSigmoid (o[1 + kk]); sum += harm[kk]; }
         const float inv = 1.f / sum;
-        for (int s = 0; s < nStrings; ++s)
+        for (int s = 0; s < v.nStr; ++s)
             for (int kk = 0; kk < v.nAct; ++kk)
             {
                 const int j = s * v.nAct + kk;
@@ -623,6 +675,7 @@ void Engine::neuralTick()
     if (g == 0)
     {
         float noisePower[kNoise] {};
+        float noisePowerR[kNoise] {};   // solo estereo: potencia de ruido del canal derecho (noisePower = izquierdo)
         bool anyNoise = false;
         if (idleNoiseVoices > 0 && idleRow >= 0)
         {
@@ -631,28 +684,44 @@ void Engine::neuralTick()
             for (int kk = 0; kk < kNoise; ++kk)
             {
                 const float m = modifiedSigmoid (o[1 + kHarm + kk]);
-                noisePower[kk] += (float) nIdle * m * m * noiseGain * noiseGain;
+                const float pw = (float) nIdle * m * m * noiseGain * noiseGain;
+                noisePower[kk] += pw;
+                noisePowerR[kk] += pw;
             }
             anyNoise = nIdle > 0;
         }
         for (const auto& v : voices)
         {
             if (v.state == State::Free || v.retire) continue;
-            for (int kk = 0; kk < kNoise; ++kk) noisePower[kk] += v.noisePow[kk];
+            if (stereoMode)
+            {
+                // el ruido de cada voz se reparte por registro igual que sus armonicos (potencia = ganancia^2)
+                float gl, gr;
+                panGains (v.note, gl, gr);
+                for (int kk = 0; kk < kNoise; ++kk)
+                {
+                    noisePower[kk] += gl * gl * v.noisePow[kk];
+                    noisePowerR[kk] += gr * gr * v.noisePow[kk];
+                }
+            }
+            else
+                for (int kk = 0; kk < kNoise; ++kk) noisePower[kk] += v.noisePow[kk];
             anyNoise = true;
         }
 
         const int64_t t = frameIndex++;
         const int64_t base = t * kHop;
-        for (int n = 0; n < kHop; ++n) ring[(int) ((base + kHop + n) & (kRing - 1))] = 0.f;
-        if (anyNoise)
+        // Una realizacion de ruido filtrado en 'rg' con la potencia por banda 'pwr' (en estereo, una independiente por canal)
+        auto makeNoise = [&] (const float* pwr, float* rg)
         {
+            for (int n = 0; n < kHop; ++n) rg[(int) ((base + kHop + n) & (kRing - 1))] = 0.f;
+            if (! anyNoise) return;
             float re[kWin], im[kWin];
             for (int n = 0; n < kWin; ++n) { re[n] = uniform(); im[n] = 0.f; }
             fft (re, im, false);
             for (int kk = 0; kk <= kWin / 2; ++kk)
             {
-                const float m = (kk < kNoise) ? std::sqrt (noisePower[kk]) : 0.f;   // el bin de Nyquist va a 0 (padding del entrenamiento)
+                const float m = (kk < kNoise) ? std::sqrt (pwr[kk]) : 0.f;   // el bin de Nyquist va a 0 (padding del entrenamiento)
                 re[kk] *= m; im[kk] *= m;
                 if (kk > 0 && kk < kWin / 2) { re[kWin - kk] *= m; im[kWin - kk] *= m; }
             }
@@ -660,9 +729,11 @@ void Engine::neuralTick()
             for (int n = 0; n < kWin; ++n)
             {
                 const float x = re[(n + kHop) & (kWin - 1)] / (float) kWin;   // irfft + roll(window/2)
-                ring[(int) ((base + n) & (kRing - 1))] += x * hann[n];
+                rg[(int) ((base + n) & (kRing - 1))] += x * hann[n];
             }
-        }
+        };
+        makeNoise (noisePower, ring);
+        if (stereoMode) makeNoise (noisePowerR, ringR);
         noiseRead = (double) base - 3.0;   // 3 muestras de retardo para que el interpolador cubico vea datos finales
         profNoise += std::chrono::duration<double> (std::chrono::steady_clock::now() - tNet1).count();
     }
@@ -671,15 +742,22 @@ void Engine::neuralTick()
 // ------------------------------------------------------------------------------
 // Sintesis de un tramo del segmento actual
 // ------------------------------------------------------------------------------
-void Engine::synthSegment (float* out, int n)
+void Engine::synthSegment (float* out, float* outR, int n)
 {
     const auto tS0 = std::chrono::steady_clock::now();
     std::fill (out, out + n, 0.f);
+    if (outR) std::fill (outR, outR + n, 0.f);
 
     for (auto& v : voices)
     {
         if (v.state == State::Free || v.nPartPad == 0) continue;
         const int M = v.nPartPad;
+
+        // Panoramica por registro (solo en estereo): graves a la izquierda, agudos a la derecha
+        float gl = 1.f, gr = 1.f;
+        if (outR)
+            panGains (v.note, gl, gr);
+
         for (int i = 0; i < n; ++i)
         {
             float acc[4] = { 0.f, 0.f, 0.f, 0.f };
@@ -694,13 +772,16 @@ void Engine::synthSegment (float* out, int n)
                     v.g[q] += v.dg[q];
                     acc[l] += ns * v.g[q];
                 }
-            out[i] += (acc[0] + acc[1]) + (acc[2] + acc[3]);
+            const float s = (acc[0] + acc[1]) + (acc[2] + acc[3]);
+            if (outR) { out[i] += gl * s; outR[i] += gr * s; }
+            else out[i] += s;
         }
     }
 
     for (int i = 0; i < n; ++i)
     {
         out[i] += noiseSample (noiseRead);
+        if (outR) outR[i] += noiseSampleFrom (ringR, noiseRead);
         noiseRead += noiseInc;
     }
 
@@ -708,18 +789,27 @@ void Engine::synthSegment (float* out, int n)
     segLeft -= n;
 }
 
-void Engine::render (float* out, int n)
+void Engine::renderImpl (float* out, float* outR, int n)
 {
-    if (! loaded) { std::fill (out, out + n, 0.f); return; }
+    if (! loaded)
+    {
+        std::fill (out, out + n, 0.f);
+        if (outR) std::fill (outR, outR + n, 0.f);
+        return;
+    }
+    stereoMode = outR != nullptr;
     int pos = 0;
     while (pos < n)
     {
         if (segLeft <= 0) neuralTick();
         const int todo = std::min (segLeft, n - pos);
-        synthSegment (out + pos, todo);
+        synthSegment (out + pos, outR ? outR + pos : nullptr, todo);
         pos += todo;
     }
 }
+
+void Engine::render (float* out, int n) { renderImpl (out, nullptr, n); }
+void Engine::renderStereo (float* outL, float* outR, int n) { renderImpl (outL, outR, n); }
 
 // ------------------------------------------------------------------------------
 // Tests (prueba de oro)

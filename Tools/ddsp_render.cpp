@@ -62,6 +62,7 @@ static int cmdRender (int argc, char** argv)
     engine.setPolyphonyLimit (24);
     if (argc > 9) engine.setNoise ((float) std::atof (argv[8]), (float) std::atof (argv[9]));   // ruido: nivel y reduccion en extremos
     if (argc > 6) engine.setIdleNoiseVoices (std::atoi (argv[6]));   // p.ej. 24 para igualar el render de referencia de Python
+    if (argc > 11) { engine.setHumanize ((float) std::atof (argv[10])); engine.setUnison ((float) std::atof (argv[11])); }   // variacion entre notas y 2ª cuerda
 
     std::vector<Event> ev;
     double endT = 0.0;
@@ -80,6 +81,8 @@ static int cmdRender (int argc, char** argv)
 
     const size_t total = (size_t) std::llround (endT * sr);
     std::vector<float> out (total, 0.f);
+    const bool stereo = argc > 12 && std::strcmp (argv[12], "stereo") == 0;   // escribe salida.wav (L) y salida.wav.R.wav (R)
+    std::vector<float> outR (stereo ? total : 0, 0.f);
     size_t pos = 0;
     int peakVoices = 0;
     const int blockSize = argc > 7 ? std::atoi (argv[7]) : 512;
@@ -92,7 +95,8 @@ static int cmdRender (int argc, char** argv)
         {
             const int n = (int) std::min<size_t> ((size_t) blockSize, target - pos);   // bloques como un DAW
             const auto b0 = std::chrono::steady_clock::now();
-            engine.render (out.data() + pos, n);
+            if (stereo) engine.renderStereo (out.data() + pos, outR.data() + pos, n);
+            else        engine.render (out.data() + pos, n);
             if (n == blockSize) blockMs.push_back (std::chrono::duration<double, std::milli> (std::chrono::steady_clock::now() - b0).count());
             peakVoices = std::max (peakVoices, engine.numActiveVoices());
             pos += (size_t) n;
@@ -109,6 +113,7 @@ static int cmdRender (int argc, char** argv)
     const double secs = std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count();
 
     if (! writeWavFloat (argv[4], out, (uint32_t) sr)) { std::cerr << "No se pudo escribir " << argv[4] << "\n"; return 1; }
+    if (stereo && ! writeWavFloat (std::string (argv[4]) + ".R.wav", outR, (uint32_t) sr)) { std::cerr << "No se pudo escribir el canal R\n"; return 1; }
     std::printf ("[OK] %s  (%.1f s de audio en %.2f s -> %.1fx tiempo real, voces pico=%d, semantica v%d)\n",
                  argv[4], endT, secs, endT / secs, peakVoices, engine.semanticsVersion());
     if (! blockMs.empty())

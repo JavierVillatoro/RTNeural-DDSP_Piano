@@ -96,9 +96,9 @@ if (DDSP_BUILD_PLUGIN)
     # Pesos y respuesta al impulso EMBEBIDOS en el binario: el plugin no depende de ninguna ruta del disco
     juce_add_binary_data(DDSPianoData SOURCES
         Resources/ddsp_weights_v6.bin
-        Resources/reverb_ir_v6.wav
+        Resources/reverb_ir_v6_st.wav
         Resources/ddsp_weights_v8.bin
-        Resources/reverb_ir_v8.wav)
+        Resources/reverb_ir_v8_st.wav)   # *_st.wav: IR estereo (L = IR aprendida, R = version decorrelada; ver Tools/make_stereo_ir.py)
     set_target_properties(DDSPianoData PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
     target_sources(DDSPiano PRIVATE

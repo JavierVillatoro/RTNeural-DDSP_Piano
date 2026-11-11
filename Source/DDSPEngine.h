@@ -104,6 +104,16 @@ public:
     void setMaxHoldSeconds (float s) noexcept { maxHoldSec = s; }
     /** Nivel global del ruido filtrado (1 = el del modelo) y reduccion extra en los extremos del teclado (0..1). */
     void setNoise (float gain, float extremes) noexcept { noiseGain = gain; noiseExtremes = extremes; }
+    /** Variacion sutil entre notas (0..1; 0 = desactivada, el audio es identico al de siempre). Al empezar cada nota
+        se sortea, una sola vez: un pequeno cambio de velocity (hasta ±6 %, lo oye la red como cambio de volumen y
+        brillo coherente), una afinacion (hasta ±2 cents) y un "color" distinto por parcial (hasta ±0,7 dB).
+        Coste en tiempo real: nulo (solo ocurre al pulsar la tecla). */
+    void setHumanize (float amount01) noexcept { humanize = amount01; }
+    /** Segunda cuerda ligeramente desafinada (0..1; 0 = desactivada). Crea el batido lento de un piano real (el de
+        las notas con 2-3 cuerdas por tecla): la desafinacion (0,8-2,5 cents, signo aleatorio por nota) la
+        ve cada armonico, asi los agudos laten mas deprisa. Solo en notas por encima de ~30 (los bajos
+        graves tienen una cuerda) y en modelos entrenados con 1 cuerda. Duplica los osciladores de esas voces. */
+    void setUnison (float amount01) noexcept { unison = amount01; }
     /** Voces "inactivas" que aportan ruido de fondo (solo modelos v1, que lo aprendieron asi). */
     void setIdleNoiseVoices (int n) noexcept { idleNoiseVoices = n; }
     int  getTrainedVoices() const noexcept { return trainedVoices; }
@@ -115,6 +125,11 @@ public:
 
     /** Escribe 'n' muestras MONO (sin reverb) en out. */
     void render (float* out, int n);
+    /** Igual, en estereo: cada voz se reparte segun su nota (graves a la izquierda, agudos a la derecha, como los oye
+        quien toca; hasta ±kMaxPan en los extremos del teclado, ley de potencia constante normalizada para que el centro
+        valga 1 en cada canal). El ruido filtrado va al centro. Con 'width' del plugin (mezcla M/S) se estrecha o ensancha. */
+    void renderStereo (float* outL, float* outR, int n);
+    static constexpr float kMaxPan = 0.7f;
 
     int  numActiveVoices() const noexcept;
     bool isSustainDown() const noexcept { return pedalDown; }
@@ -146,7 +161,8 @@ private:
         float noisePow[kNoise] {}; // potencia de ruido de su ultimo frame
         uint64_t order = 0;
         int   nAct = 0;            // armonicos por debajo de 8 kHz
-        int   nPart = 0;           // nAct * n_strings
+        int   nStr = 1;            // cuerdas de esta nota (las del modelo, o 2 si se anade la segunda cuerda del "unison")
+        int   nPart = 0;           // nAct * nStr
         int   nPartPad = 0;        // redondeado a multiplo de 4
         alignas (32) float in[kCoreIn] {};
         alignas (32) float cr[kPartials] {}, ci[kPartials] {}, rc[kPartials] {}, rs[kPartials] {};
@@ -173,6 +189,7 @@ private:
     // -- fisica
     float alphaB = 0, betaB = 0, alphaT = 0, betaT = 0;
     float noiseGain = 1.f, noiseExtremes = 0.f;
+    float humanize = 0.f, unison = 0.f;
     int   semantics = 2;
     int   nStrings = 1;
     float stringGain = 1.f;
@@ -196,6 +213,8 @@ private:
 
     // -- ruido (16 kHz, OLA) compartido por todas las voces
     float ring[kRing] {};
+    float ringR[kRing] {};      // canal derecho del ruido (solo en estereo: ruido independiente por lado)
+    bool  stereoMode = false;   // true mientras se renderiza con renderStereo
     double noiseRead = 0.0;
     double noiseInc = 0.0;
     uint32_t rng = 0x12345678u;
@@ -211,13 +230,18 @@ private:
     int  findFreeVoice() const;
     int  allocateVoice();
     void startVoice (int idx, int note, float vel);
-    void setupPartials (Voice& v);
+    /** tune = factor de frecuencia de toda la nota; w2/det2 = peso y factor de frecuencia de la 2ª cuerda del unison
+        (w2 = 0: sin unison); colour = amplitud (0..1) de la variacion aleatoria de cada parcial. */
+    void setupPartials (Voice& v, float tune, float w2, float det2, float colour);
     void neuralTick();
     int64_t tickBoundary (int64_t k) const noexcept;
     int64_t tickCount = 0;
-    void synthSegment (float* out, int n);
+    void synthSegment (float* out, float* outR, int n);   // outR = nullptr: mono
+    void renderImpl (float* out, float* outR, int n);
     void retireVoice (Voice& v);
-    float noiseSample (double pos) const noexcept;
+    float noiseSample (double pos) const noexcept { return noiseSampleFrom (ring, pos); }
+    float noiseSampleFrom (const float* r, double pos) const noexcept;
+    static void panGains (int note, float& gl, float& gr) noexcept;
     void zeroState();
 };
 
