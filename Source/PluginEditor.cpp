@@ -33,7 +33,10 @@ DDSPianoAudioProcessorEditor::DDSPianoAudioProcessorEditor (DDSPianoAudioProcess
       touchAtt (p.apvts, "touch", touch), velMaxAtt (p.apvts, "velmax", velMax), dynamicsAtt (p.apvts, "dynamics", dynamics),
       velCompAtt (p.apvts, "velcomp", velCompBtn),
       transposeAtt (p.apvts, "transpose", transpose), humanizeAtt (p.apvts, "humanize", humanize), unisonAtt (p.apvts, "unison", unison),
-      widthAtt (p.apvts, "width", width)
+      widthAtt (p.apvts, "width", width), bassTuningAtt (p.apvts, "bassb", bassTuning),
+      damperAtt (p.apvts, "damper", damper),
+      evennessAtt (p.apvts, "evenness", evenness), toneAtt (p.apvts, "tone", tone),
+      hardnessAtt (p.apvts, "hardness", hardness), mechanicsAtt (p.apvts, "mechanics", mechanics)
 {
     setupModelButton (*this, v6Btn, juce::Colour (0xffb8860b));
     setupModelButton (*this, v8Btn, juce::Colour (0xff2e8b57));
@@ -54,6 +57,24 @@ DDSPianoAudioProcessorEditor::DDSPianoAudioProcessorEditor (DDSPianoAudioProcess
     setupKnob (*this, transpose, transposeLabel, "Transpose (semitonos)");
     setupKnob (*this, humanize, humanizeLabel, "Humanize (variacion)");
     setupKnob (*this, unison, unisonLabel, "Unison (2ª cuerda)");
+    setupKnob (*this, evenness, evennessLabel, "Evenness (agudos)");
+    evenness.setDoubleClickReturnValue (true, 0.5);
+    evenness.setTooltip ("Fase 2. Sube el nivel de los agudos altos (MIDI 84+) hacia el de las grabaciones reales (en el DDSP salian ~8 dB bajos). De 36 a 83 no toca nada. 0 = desactivado.");
+    setupKnob (*this, tone, toneLabel, "Tone (brillo)");
+    tone.setDoubleClickReturnValue (true, 0.0);
+    tone.setTooltip ("Fase 2. Brillo global: -6..+6 dB por encima de ~3 kHz. 0 = neutro.");
+    setupKnob (*this, hardness, hardnessLabel, "Hardness (martillo)");
+    hardness.setDoubleClickReturnValue (true, 0.0);
+    hardness.setTooltip ("Fase 2. Timbre de martillo blando (-) o duro (+) manteniendo el volumen de cada nota. 0 = neutro.");
+    setupKnob (*this, mechanics, mechanicsLabel, "Mechanics (mecanica)");
+    mechanics.setDoubleClickReturnValue (true, 0.0);
+    mechanics.setTooltip ("Fase 3. Golpe grave del martillo, golpe al soltar la tecla y ruidos de pedal (sintetizados, sin muestras). 1 = calibrado con grabaciones reales; 0 = apagado.");
+    setupKnob (*this, damper, damperLabel, "Damper (al soltar)");
+    damper.setDoubleClickReturnValue (true, 1.0);
+    damper.setTooltip ("Al soltar la tecla, los armonicos agudos y el ruido mueren mas rapido (como un apagador real). 0 = como antes: queda un brillo metalico que crece al soltar, sobre todo en los graves.");
+    setupKnob (*this, bassTuning, bassTuningLabel, "Bass Tuning (graves)");
+    bassTuning.setDoubleClickReturnValue (true, 1.0);
+    bassTuning.setTooltip ("Inarmonicidad de los graves: 0 = formula original del entrenamiento, 1 = medida en pianos reales (parciales altos mas cerca de su sitio). Afecta a las notas nuevas.");
     setupKnob (*this, width, widthLabel, "Width (estereo)");
     width.setDoubleClickReturnValue (true, 1.0);
     width.setTooltip ("Anchura estereo: graves a la izquierda y agudos a la derecha + reverb estereo. 0 = mono, 1 = normal, >1 = mas ancho.");
@@ -81,7 +102,7 @@ DDSPianoAudioProcessorEditor::DDSPianoAudioProcessorEditor (DDSPianoAudioProcess
     addAndMakeVisible (keyboard);
     sustainBtn.onClick = [this] { processor.virtualSustain.store (sustainBtn.getToggleState()); };
     addAndMakeVisible (sustainBtn);
-    setSize (700, 690);
+    setSize (940, 650);
     startTimerHz (10);
     timerCallback();
 }
@@ -171,7 +192,7 @@ void DDSPianoAudioProcessorEditor::resized()
     v8Btn.setBounds (modelRow);
     area.removeFromTop (10);
 
-    keyboard.setBounds (area.removeFromBottom (96));
+    keyboard.setBounds (area.removeFromBottom (80));
     area.removeFromBottom (6);
     auto bottom = area.removeFromBottom (30);
     sustainBtn.setBounds (bottom.removeFromRight (200));
@@ -184,37 +205,25 @@ void DDSPianoAudioProcessorEditor::resized()
     velInfo.setBounds (velRow);
     area.removeFromBottom (6);
 
-    // fila 1: sonido; fila 2: transposicion / variacion / unison; fila 3: curva de velocity
-    auto row1 = area.removeFromTop (120);
-    const int w = row1.getWidth() / 5;
-    juce::Slider* sliders[] = { &gain, &room, &voices, &noise, &noiseExt };
-    juce::Label* labels[] = { &gainLabel, &roomLabel, &voicesLabel, &noiseLabel, &noiseExtLabel };
-    for (int i = 0; i < 5; ++i)
+    // A la derecha, la grafica de la curva de velocity; a la izquierda, una rejilla de 3 filas x 6 mandos:
+    //   fila 1 = sonido; fila 2 = vida y mecanica (fases 1 y 3); fila 3 = timbre y dinamica (fase 2 + curva de velocity)
+    curveView.setBounds (area.removeFromRight (190).removeFromTop (190));
+    area.removeFromRight (8);
+    struct Cell { juce::Slider* s; juce::Label* l; };
+    const Cell grid[3][6] = {
+        { { &gain, &gainLabel }, { &room, &roomLabel }, { &width, &widthLabel }, { &noise, &noiseLabel }, { &noiseExt, &noiseExtLabel }, { &voices, &voicesLabel } },
+        { { &transpose, &transposeLabel }, { &humanize, &humanizeLabel }, { &unison, &unisonLabel }, { &bassTuning, &bassTuningLabel }, { &damper, &damperLabel }, { &mechanics, &mechanicsLabel } },
+        { { &evenness, &evennessLabel }, { &tone, &toneLabel }, { &hardness, &hardnessLabel }, { &touch, &touchLabel }, { &velMax, &velMaxLabel }, { &dynamics, &dynamicsLabel } },
+    };
+    const int rowH = area.getHeight() / 3, colW = area.getWidth() / 6;
+    for (int r = 0; r < 3; ++r)
     {
-        auto col = row1.removeFromLeft (w);
-        labels[i]->setBounds (col.removeFromTop (22));
-        sliders[i]->setBounds (col);
-    }
-
-    auto rowLife = area.removeFromTop (120);
-    const int wl = rowLife.getWidth() / 5;
-    juce::Slider* slidersL[] = { &transpose, &humanize, &unison, &width };
-    juce::Label* labelsL[] = { &transposeLabel, &humanizeLabel, &unisonLabel, &widthLabel };
-    for (int i = 0; i < 4; ++i)
-    {
-        auto col = rowLife.removeFromLeft (wl);
-        labelsL[i]->setBounds (col.removeFromTop (22));
-        slidersL[i]->setBounds (col);
-    }
-
-    curveView.setBounds (area.removeFromLeft (area.getHeight()).withTrimmedRight (0));
-    const int w2 = area.getWidth() / 3;
-    juce::Slider* sliders2[] = { &touch, &velMax, &dynamics };
-    juce::Label* labels2[] = { &touchLabel, &velMaxLabel, &dynamicsLabel };
-    for (int i = 0; i < 3; ++i)
-    {
-        auto col = area.removeFromLeft (w2);
-        labels2[i]->setBounds (col.removeFromTop (22));
-        sliders2[i]->setBounds (col);
+        auto row = area.removeFromTop (rowH);
+        for (int c = 0; c < 6; ++c)
+        {
+            auto col = row.removeFromLeft (colW);
+            grid[r][c].l->setBounds (col.removeFromTop (20));
+            grid[r][c].s->setBounds (col);
+        }
     }
 }

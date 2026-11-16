@@ -307,11 +307,25 @@ int Engine::allocateVoice()
     return idx;
 }
 
+// B_real / B_formula por tecla. Salamander (Yamaha C5, 9 notas de MIDI 21 a 45): 0,38-0,55 (mediana 0,48); MAESTRO (Disklavier):
+// ~0,42 en MIDI 28-39 y ~0,75 en 40-51; en medios y agudos (>= ~52) la formula acierta (1,01). Es un suavizado de esas medidas:
+// plano en el extremo grave, subida lineal hasta 0,9 en MIDI 51 y hasta 1 en MIDI 56.
+float Engine::inharmonicityRatio (int note) noexcept
+{
+    const float n = (float) note;
+    if (n <= 36.f) return 0.47f;
+    if (n <= 51.f) return 0.47f + (n - 36.f) * (0.90f - 0.47f) / 15.f;
+    if (n <= 56.f) return 0.90f + (n - 51.f) * (1.00f - 0.90f) / 5.f;
+    return 1.0f;
+}
+
 void Engine::setupPartials (Voice& v, float tune, float w2, float det2, float colour)
 {
     const double p = (double) v.note;
     const double f0 = 440.0 * std::pow (2.0, (p - 69.0) / 12.0) * (double) tune;
-    const double B = std::exp ((double) alphaT * p + (double) betaT) + std::exp ((double) alphaB * p + (double) betaB);
+    double B = std::exp ((double) alphaT * p + (double) betaT) + std::exp ((double) alphaB * p + (double) betaB);
+    if (bassB > 0.f)
+        B *= 1.0 + (double) bassB * ((double) inharmonicityRatio (v.note) - 1.0);
 
     // Cuerdas de la nota: las del modelo, o 2 si se anade la segunda cuerda del unison (solo con modelos de 1 cuerda).
     // ratio[s] = factor de frecuencia de la cuerda; wgt[s] = su peso en amplitud.
@@ -360,11 +374,12 @@ void Engine::setupPartials (Voice& v, float tune, float w2, float det2, float co
             v.rc[j] = (float) std::cos (w);
             v.rs[j] = (float) std::sin (w);
             v.mask[j] = fk < (double) cutoffHz ? wgt[s] * hueGain[k - 1] : 0.f;
+            v.fhz[j] = (float) fk;
         }
     }
 }
 
-void Engine::startVoice (int idx, int note, float vel)
+void Engine::startVoice (int idx, int note, float vel, float gain)
 {
     // Variacion entre notas: se sortea UNA vez aqui (nada cuesta en el hilo de audio por muestra). Si esta desactivada
     // no se consume el generador de ruido, asi el audio es identico bit a bit al de antes.
@@ -393,6 +408,7 @@ void Engine::startVoice (int idx, int note, float vel)
     v.retire = false;
     v.note = note;
     v.vel = vel;
+    v.noteGain = gain;
     v.fadeLeft = 0;
     v.framesOnset = 0;
     v.framesState = 0;
@@ -404,7 +420,7 @@ void Engine::startVoice (int idx, int note, float vel)
     setupPartials (v, tune, w2, det2, colour);
 }
 
-void Engine::noteOn (int note, float velocity01)
+void Engine::noteOn (int note, float velocity01, float gain)
 {
     if (! loaded) return;
     // Una nota repetida corta a la anterior del mismo pitch (entra en release, como en el dataset)
@@ -416,7 +432,7 @@ void Engine::noteOn (int note, float velocity01)
         }
     const int idx = allocateVoice();
     if (idx >= 0)
-        startVoice (idx, note, std::clamp (velocity01, 0.f, 1.f));
+        startVoice (idx, note, std::clamp (velocity01, 0.f, 1.f), gain);
 }
 
 void Engine::noteOff (int note)
@@ -657,14 +673,40 @@ void Engine::neuralTick()
             for (int kk = 0; kk < v.nAct; ++kk)
             {
                 const int j = s * v.nAct + kk;
-                v.target[j] = amp * harm[kk] * inv * stringGain * v.mask[j];
+                v.target[j] = amp * harm[kk] * inv * stringGain * v.mask[j] * v.noteGain;
             }
+        // fundido final de la cola: los ultimos 300 ms del release la llevan a 0 suavemente. Sin esto, al retirar la voz hay un
+        // repunte (+6 dB medido en las teclas mas graves) y un corte seco a silencio digital.
+        float releaseFade = 1.f;
+        if ((releaseDamp > 0.f || releaseNoiseTau > 0.f) && v.state == State::Releasing)
+        {
+            const float u = std::clamp ((float) (releaseFrames - v.framesState) / (0.3f * (float) kFrameRate), 0.f, 1.f);
+            releaseFade = u * u * (3.f - 2.f * u);
+        }
+        // apagador: tras soltar, cuanto mas agudo el armonico, mas rapido muere
+        if (releaseDamp > 0.f && v.state == State::Releasing)
+        {
+            const float t = (float) v.framesState / (float) kFrameRate;   // segundos desde que se solto
+            const float fadeMix = (1.f - releaseDamp) + releaseDamp * releaseFade;
+            for (int s = 0; s < v.nStr; ++s)
+                for (int kk = 0; kk < v.nAct; ++kk)
+                {
+                    const int j = s * v.nAct + kk;
+                    const float r = v.fhz[j] / 800.f;
+                    const float tau = 0.08f + 0.92f / (1.f + r * r);
+                    v.target[j] *= ((1.f - releaseDamp) + releaseDamp * std::exp (-t / tau)) * fadeMix;
+                }
+        }
         for (int j = 0; j < v.nPartPad; ++j) v.dg[j] = (v.target[j] - v.g[j]) / period;
 
+        // ruido de una nota soltada: decae con la nota (en vez de quedarse plano todo el release)
+        const float relNoise = (releaseNoiseTau > 0.f && v.state == State::Releasing)
+                                   ? std::exp (-(float) v.framesState / ((float) kFrameRate * releaseNoiseTau)) * releaseFade : 1.f;
         for (int kk = 0; kk < kNoise; ++kk)
         {
             const float m = modifiedSigmoid (o[1 + kHarm + kk]);
-            v.noisePow[kk] = m * m * noiseScale (v.note) * noiseScale (v.note);
+            const float ns = noiseScale (v.note) * relNoise * v.noteGain;
+            v.noisePow[kk] = m * m * ns * ns;
         }
     }
 

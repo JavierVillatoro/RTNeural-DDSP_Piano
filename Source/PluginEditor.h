@@ -46,9 +46,14 @@ private:
     juce::AudioProcessorValueTreeState::ButtonAttachment velCompAtt;
 
     // Transposicion y "vida" del sonido
-    juce::Slider transpose, humanize, unison, width;
-    juce::Label transposeLabel, humanizeLabel, unisonLabel, widthLabel;
-    juce::AudioProcessorValueTreeState::SliderAttachment transposeAtt, humanizeAtt, unisonAtt, widthAtt;
+    juce::Slider transpose, humanize, unison, width, bassTuning, damper;
+    juce::Label transposeLabel, humanizeLabel, unisonLabel, widthLabel, bassTuningLabel, damperLabel;
+    juce::AudioProcessorValueTreeState::SliderAttachment transposeAtt, humanizeAtt, unisonAtt, widthAtt, bassTuningAtt, damperAtt;
+
+    // Fase 2 (uniformidad y timbre) y fase 3 (mecanica)
+    juce::Slider evenness, tone, hardness, mechanics;
+    juce::Label evennessLabel, toneLabel, hardnessLabel, mechanicsLabel;
+    juce::AudioProcessorValueTreeState::SliderAttachment evennessAtt, toneAtt, hardnessAtt, mechanicsAtt;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DDSPianoAudioProcessorEditor)
 };

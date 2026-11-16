@@ -122,4 +122,26 @@ if (DDSP_BUILD_PLUGIN)
     if (MSVC)
         target_compile_options(DDSPiano PRIVATE /W3)
     endif()
+
+    # Renderizador del PLUGIN REAL por linea de comandos (mismo PluginProcessor que el DAW): sirve para probar y comparar sin abrir ventanas
+    if (DDSP_BUILD_TOOLS)
+        juce_add_console_app(ddsp_plugin_render PRODUCT_NAME "ddsp_plugin_render")
+        juce_generate_juce_header(ddsp_plugin_render)
+        target_sources(ddsp_plugin_render PRIVATE
+            Tools/plugin_render.cpp
+            Source/PluginProcessor.cpp
+            Source/PluginEditor.cpp)
+        target_include_directories(ddsp_plugin_render PRIVATE Source)
+        target_compile_definitions(ddsp_plugin_render PUBLIC
+            JUCE_WEB_BROWSER=0
+            JUCE_USE_CURL=0)
+        target_link_libraries(ddsp_plugin_render
+            PRIVATE
+                DDSPianoData
+                ddsp_engine
+                juce::juce_audio_utils
+                juce::juce_dsp
+            PUBLIC
+                juce::juce_recommended_config_flags)
+    endif()
 endif()

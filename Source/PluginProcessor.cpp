@@ -15,14 +15,8 @@ struct ModelData
 // ~9-10 dB mas fuerte que el v6 a velocity media (5 dB a fortissimo, 12 dB a pianissimo).
 const float kModelGainDb[DDSPianoAudioProcessor::kModels] = { 0.0f, -10.0f };
 
-// Nivel RMS medio (dB, 0,5 s tras el ataque; notas 36/48/60/72/84) de cada modelo para velocity 0.1, 0.2 ... 1.0.
-// Medido con ddsp_render; sirve para la "compensacion del modelo" de la curva de velocity (ver VelocityCurve.h).
-// Si se reentrena o se anade un modelo hay que volver a medirlo.
-const float kLevelDb[DDSPianoAudioProcessor::kModels][ddsp::VelocityCurve::kPoints] =
-{
-    { -76.3f, -70.5f, -65.0f, -59.8f, -54.9f, -50.4f, -46.7f, -43.6f, -40.8f, -38.1f },   // v6
-    { -62.3f, -57.3f, -52.8f, -48.4f, -44.2f, -40.3f, -36.9f, -34.4f, -32.7f, -31.5f },   // v8
-};
+// Tablas de nivel medido por modelo (LevelTables.h): compensacion de la curva de velocity y Hardness.
+const float* const kLevelDb[DDSPianoAudioProcessor::kModels] = { ddsp::kLevelDbV6, ddsp::kLevelDbV8 };
 
 const ModelData kModelData[DDSPianoAudioProcessor::kModels] =
 {
@@ -62,6 +56,24 @@ juce::AudioProcessorValueTreeState::ParameterLayout DDSPianoAudioProcessor::crea
                                                        NormalisableRange<float> (0.0f, 1.0f, 0.01f), 0.4f));
     layout.add (std::make_unique<AudioParameterFloat> (ParameterID { "unison", 1 }, "Unison",
                                                        NormalisableRange<float> (0.0f, 1.0f, 0.01f), 0.4f));
+    // Fase 2 (uniformidad y timbre): Evenness = sube los agudos altos (MIDI 84+) hacia el nivel de las grabaciones reales;
+    // Tone = brillo global (-6..+6 dB por encima de ~3 kHz); Hardness = timbre de martillo blando/duro sin cambiar el volumen
+    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { "evenness", 1 }, "Evenness",
+                                                       NormalisableRange<float> (0.0f, 1.0f, 0.01f), 0.5f));
+    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { "tone", 1 }, "Tone",
+                                                       NormalisableRange<float> (-1.0f, 1.0f, 0.01f), 0.0f));
+    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { "hardness", 1 }, "Hardness",
+                                                       NormalisableRange<float> (-1.0f, 1.0f, 0.01f), 0.0f));
+    // Fase 3 (mecanica): golpe grave de martillo al pulsar, golpe al soltar la tecla y ruidos de pedal, sintetizados.
+    // 1 = calibrado (ataque: grabaciones reales de MAESTRO; suelta y pedal: la mezcla del autor de Salamander); 0 = apagado.
+    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { "mechanics", 1 }, "Mechanics",
+                                                       NormalisableRange<float> (0.0f, 2.0f, 0.01f), 0.0f));   // apagado por defecto: el usuario lo oyo "ruido anadido"
+    // Apagador al soltar la tecla: 0 = como antes (los armonicos agudos crecen y el ruido queda plano), 1 = mueren rapido
+    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { "damper", 1 }, "Damper",
+                                                       NormalisableRange<float> (0.0f, 1.0f, 0.01f), 1.0f));
+    // Inarmonicidad de los graves: 0 = formula original con la que se entreno el modelo, 1 = B medida (Salamander/MAESTRO)
+    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { "bassb", 1 }, "Bass Tuning",
+                                                       NormalisableRange<float> (0.0f, 1.0f, 0.01f), 1.0f));
     // Anchura estereo (mezcla M/S del resultado final): 0 = mono, 1 = reparto por registro + reverb estereo, >1 = mas ancho
     layout.add (std::make_unique<AudioParameterFloat> (ParameterID { "width", 1 }, "Width",
                                                        NormalisableRange<float> (0.0f, 1.5f, 0.01f), 1.0f));
@@ -88,6 +100,12 @@ DDSPianoAudioProcessor::DDSPianoAudioProcessor()
     pHumanize = apvts.getRawParameterValue ("humanize");
     pUnison = apvts.getRawParameterValue ("unison");
     pWidth = apvts.getRawParameterValue ("width");
+    pBassB = apvts.getRawParameterValue ("bassb");
+    pDamper = apvts.getRawParameterValue ("damper");
+    pEvenness = apvts.getRawParameterValue ("evenness");
+    pTone = apvts.getRawParameterValue ("tone");
+    pHardness = apvts.getRawParameterValue ("hardness");
+    pMechanics = apvts.getRawParameterValue ("mechanics");
     clearSoundingNotes();
 
     for (int m = 0; m < kModels; ++m)
@@ -159,6 +177,10 @@ void DDSPianoAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
         e->prepare (sampleRate);
     mono.assign ((size_t) maxBlock, 0.0f);
     monoR.assign ((size_t) maxBlock, 0.0f);
+    toneShelf.prepare (sampleRate);
+    mech.prepare (sampleRate);
+    mech.setModel (activeModel);
+    mechPedalDown = false;
     widthSmooth.reset (sampleRate, 0.05);
     widthSmooth.setCurrentAndTargetValue (pWidth->load());
     revBuf.setSize (2, maxBlock, false, true, false);
@@ -213,6 +235,8 @@ void DDSPianoAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         activeModel = requested;
         engines[(size_t) activeModel]->reset();
         clearSoundingNotes();
+        mech.reset();
+        mech.setModel (activeModel);
         engines[(size_t) activeModel]->setSustain (lastSustain);   // si el pedal sigue pisado, el nuevo modelo lo sabe
         fadeLeft = fadeTotal;
         activeModelUI.store (activeModel);
@@ -222,6 +246,11 @@ void DDSPianoAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     engine.setNoise (pNoise->load(), pNoiseExt->load());
     engine.setHumanize (pHumanize->load());
     engine.setUnison (pUnison->load());
+    engine.setBassInharmonicity (pBassB->load());
+    mech.setAmount (pMechanics->load());
+    const float damper = pDamper->load();
+    engine.setReleaseDamping (damper);                       // los armonicos agudos mueren antes al soltar la tecla
+    engine.setReleaseNoise (damper > 0.f ? 0.15f : 0.f);     // y el ruido decae en ~150 ms en vez de quedarse plano 1 s y cortarse
     const int transpose = (int) std::lround (pTranspose->load());
 
     // Pico de velocity del teclado fisico (antes de mezclar el teclado en pantalla): sirve para calibrar "Vel Max"
@@ -232,6 +261,10 @@ void DDSPianoAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
             peakVelIn.store ((int) m.getVelocity(), std::memory_order_relaxed);
     }
     const auto velCurve = currentVelocityCurve (activeModel);
+    ddsp::VoiceShaping shaping;
+    shaping.hardness = pHardness->load();
+    shaping.evenness = pEvenness->load();
+    shaping.levelDb = kLevelDb[activeModel];
 
     // Teclado en pantalla (y teclas del ordenador) + pedal de sustain virtual
     keyboardState.processNextMidiBuffer (midi, 0, numSamples, true);
@@ -251,6 +284,7 @@ void DDSPianoAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         if (pos > done)
         {
             engine.renderStereo (mono.data() + done, monoR.data() + done, pos - done);
+            mech.render (mono.data() + done, monoR.data() + done, pos - done);
             done = pos;
         }
         if (msg.isNoteOn())
@@ -265,19 +299,29 @@ void DDSPianoAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
             const bool inRange = n >= 21 && n <= 108;   // el rango del piano con el que se entreno el modelo
             soundingNote[(size_t) key] = inRange ? n : -1;
             if (inRange)
-                engine.noteOn (n, out);
+            {
+                float velNet, noteGain;
+                shaping.apply (n, out, velNet, noteGain);
+                engine.noteOn (n, velNet, noteGain);
+                mech.noteOn (n, out);
+            }
         }
         else if (msg.isNoteOff())
         {
             const int key = msg.getNoteNumber();
             if (soundingNote[(size_t) key] >= 0)
+            {
                 engine.noteOff (soundingNote[(size_t) key]);
+                mech.noteOff (soundingNote[(size_t) key]);
+            }
             soundingNote[(size_t) key] = -1;
         }
         else if (msg.isController() && msg.getControllerNumber() == 64)
         {
             lastSustain = (float) msg.getControllerValue() / 127.0f;
             engine.setSustain (lastSustain);
+            const bool down = lastSustain >= 0.5f;
+            if (down != mechPedalDown) { mech.pedal (down); mechPedalDown = down; }
         }
         else if (msg.isAllNotesOff() || msg.isAllSoundOff())
         {
@@ -286,7 +330,10 @@ void DDSPianoAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         }
     }
     if (done < numSamples)
+    {
         engine.renderStereo (mono.data() + done, monoR.data() + done, numSamples - done);
+        mech.render (mono.data() + done, monoR.data() + done, numSamples - done);
+    }
 
     // --- ganancia (con fundido de entrada tras un cambio de modelo) ---
     const float gain = juce::Decibels::decibelsToGain (pGain->load() + kModelGainDb[activeModel]);
@@ -331,6 +378,11 @@ void DDSPianoAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     buffer.copyFrom (0, 0, wetSum, 0, 0, numSamples);
     buffer.copyFrom (1, 0, wetSum, 1, 0, numSamples);
     mixer.mixWetSamples (block);
+
+    // --- tono: estanteria de agudos (-6..+6 dB por encima de ~3 kHz) ---
+    toneShelf.setToneDb (6.0f * pTone->load());
+    toneShelf.process (buffer.getWritePointer (0), numSamples, 0);
+    toneShelf.process (buffer.getWritePointer (1), numSamples, 1);
 
     // --- anchura estereo: mezcla M/S del resultado (seco + reverb). 0 = mono, 1 = tal cual, >1 = mas ancho ---
     widthSmooth.setTargetValue (pWidth->load());

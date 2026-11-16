@@ -8,6 +8,9 @@
 
 #include "DDSPEngine.h"
 #include "VelocityCurve.h"
+#include "VoiceShaping.h"
+#include "ToneShelf.h"
+#include "MechanicsSynth.h"
 
 // ==============================================================================
 // Procesador del plugin: solo traduce MIDI/parametros de JUCE al motor ddsp::Engine
@@ -106,6 +109,15 @@ private:
     std::atomic<float>* pHumanize = nullptr;
     std::atomic<float>* pUnison = nullptr;
     std::atomic<float>* pWidth = nullptr;
+    std::atomic<float>* pBassB = nullptr;
+    std::atomic<float>* pDamper = nullptr;
+    std::atomic<float>* pEvenness = nullptr;
+    std::atomic<float>* pTone = nullptr;
+    std::atomic<float>* pHardness = nullptr;
+    ddsp::ToneShelf toneShelf;
+    std::atomic<float>* pMechanics = nullptr;
+    ddsp::MechanicsSynth mech;           // golpe de martillo, suelta de tecla y pedal (sintetizados)
+    bool mechPedalDown = false;
 
     // Transposicion: nota que suena realmente por cada tecla pulsada (-1 = ninguna). El note-off usa esta tabla,
     // asi cambiar Transpose con notas pulsadas no deja ninguna colgada.

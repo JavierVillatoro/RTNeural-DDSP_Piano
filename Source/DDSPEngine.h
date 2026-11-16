@@ -114,11 +114,25 @@ public:
         ve cada armonico, asi los agudos laten mas deprisa. Solo en notas por encima de ~30 (los bajos
         graves tienen una cuerda) y en modelos entrenados con 1 cuerda. Duplica los osciladores de esas voces. */
     void setUnison (float amount01) noexcept { unison = amount01; }
+    /** Apagador (0..1; 0 = como siempre): al soltar la nota, los armónicos mueren tanto mas rapido cuanto mas agudos son
+        (tau de ~1 s en 100 Hz, ~0,26 s en 1,6 kHz, ~0,1 s por encima de 4 kHz). Medido: sin esto, la red hace CRECER los
+        armonicos agudos tras soltar (hasta +50 dB en do0), un brillo inarmonico denso que suena a ruido metalico. */
+    void setReleaseDamping (float amount01) noexcept { releaseDamp = amount01; }
+    /** Constante de tiempo (s) con la que decae el ruido filtrado de una nota SOLTADA (0 = como siempre). Sin esto el modelo
+        deja un suelo de ruido plano (~-66 dB en do1) durante todo el release (1 s) y luego lo corta de golpe. */
+    void setReleaseNoise (float tauSeconds) noexcept { releaseNoiseTau = tauSeconds; }
+    /** Corrige la inarmonicidad B de los graves (0..1; 0 = la formula de Rigaud con la que se entreno, identico a siempre).
+        Medido en Salamander (9 notas, MIDI 21-45) y en MAESTRO, la B real de los graves es ~0,4-0,55 veces la de la formula:
+        con la formula los parciales altos de do1 quedan desplazados ~70 cents (k=20). 1 = tabla medida (ver inharmonicityRatio). */
+    void setBassInharmonicity (float amount01) noexcept { bassB = amount01; }
+    /** Cociente B_real / B_formula por tecla que aplica setBassInharmonicity (1 por encima de MIDI 56). */
+    static float inharmonicityRatio (int note) noexcept;
     /** Voces "inactivas" que aportan ruido de fondo (solo modelos v1, que lo aprendieron asi). */
     void setIdleNoiseVoices (int n) noexcept { idleNoiseVoices = n; }
     int  getTrainedVoices() const noexcept { return trainedVoices; }
 
-    void noteOn  (int note, float velocity01);
+    /** 'gain' = ganancia lineal de esa nota (armonicos y ruido); 1 = sin cambio (ver VoiceShaping.h). */
+    void noteOn  (int note, float velocity01, float gain = 1.f);
     void noteOff (int note);
     void setSustain (float value01);
     void allNotesOff();
@@ -153,6 +167,7 @@ private:
         bool  retire = false;      // en el proximo segmento baja a 0 y pasa a Free
         int   note = 0;
         float vel = 0.f;
+        float noteGain = 1.f;      // ganancia lineal de la nota (Hardness / Evenness)
         int   fadeLeft = 0;
         int   framesOnset = 0;     // frames desde el onset
         int   framesState = 0;     // frames desde que entro en Sustained/Releasing
@@ -168,6 +183,7 @@ private:
         alignas (32) float cr[kPartials] {}, ci[kPartials] {}, rc[kPartials] {}, rs[kPartials] {};
         alignas (32) float g[kPartials] {}, dg[kPartials] {};
         alignas (32) float target[kPartials] {};
+        alignas (32) float fhz[kPartials] {};    // frecuencia (Hz) de cada parcial (para el apagador)
         alignas (32) float mask[kPartials] {};   // 0 si la parcial supera la frecuencia de corte
     };
 
@@ -190,6 +206,9 @@ private:
     float alphaB = 0, betaB = 0, alphaT = 0, betaT = 0;
     float noiseGain = 1.f, noiseExtremes = 0.f;
     float humanize = 0.f, unison = 0.f;
+    float bassB = 0.f;
+    float releaseNoiseTau = 0.f;
+    float releaseDamp = 0.f;
     int   semantics = 2;
     int   nStrings = 1;
     float stringGain = 1.f;
@@ -229,7 +248,7 @@ private:
     float noiseScale (int note) const noexcept;
     int  findFreeVoice() const;
     int  allocateVoice();
-    void startVoice (int idx, int note, float vel);
+    void startVoice (int idx, int note, float vel, float gain);
     /** tune = factor de frecuencia de toda la nota; w2/det2 = peso y factor de frecuencia de la 2ª cuerda del unison
         (w2 = 0: sin unison); colour = amplitud (0..1) de la variacion aleatoria de cada parcial. */
     void setupPartials (Voice& v, float tune, float w2, float det2, float colour);

@@ -9,6 +9,8 @@
 // Formato de eventos (texto, tiempos en segundos):   on t nota vel01 | off t nota | ped t valor01 | end t
 
 #include "DDSPEngine.h"
+#include "VoiceShaping.h"
+#include "MechanicsSynth.h"
 
 #include <algorithm>
 #include <chrono>
@@ -62,6 +64,29 @@ static int cmdRender (int argc, char** argv)
     engine.setPolyphonyLimit (24);
     if (argc > 9) engine.setNoise ((float) std::atof (argv[8]), (float) std::atof (argv[9]));   // ruido: nivel y reduccion en extremos
     if (argc > 6) engine.setIdleNoiseVoices (std::atoi (argv[6]));   // p.ej. 24 para igualar el render de referencia de Python
+    // ajustes por nombre a partir del argumento 16: hardness=-1..1 evenness=0..1 (mismo codigo que el plugin)
+    ddsp::VoiceShaping shaping;
+    shaping.levelDb = std::string (argv[3]).find ("v6") != std::string::npos ? ddsp::kLevelDbV6 : ddsp::kLevelDbV8;
+    ddsp::MechanicsSynth mech;
+    float mechAmount = 0.f;
+    for (int i = 16; i < argc; ++i)
+    {
+        const std::string a = argv[i]; const auto eq = a.find ('=');
+        if (eq == std::string::npos) continue;
+        const std::string key = a.substr (0, eq); const float val = (float) std::atof (a.c_str() + eq + 1);
+        if (key == "hardness") shaping.hardness = val;
+        else if (key == "evenness") shaping.evenness = val;
+        else if (key == "mechanics") mechAmount = val;
+        else std::cerr << "ajuste desconocido: " << key << "\n";
+    }
+    mech.prepare (sr);
+    mech.setModel (std::string (argv[3]).find ("v6") != std::string::npos ? 0 : 1);
+    mech.setAmount (mechAmount);
+    bool pedalWasDown = false;
+    std::vector<float> mechR;
+    if (argc > 15) engine.setReleaseDamping ((float) std::atof (argv[15]));   // 0 = como antes, 1 = apagador completo
+    if (argc > 14) engine.setReleaseNoise ((float) std::atof (argv[14]));   // tau (s) del decaimiento del ruido al soltar; 0 = desactivado
+    if (argc > 13) engine.setBassInharmonicity ((float) std::atof (argv[13]));   // 0 = formula de Rigaud, 1 = B medida en los graves
     if (argc > 11) { engine.setHumanize ((float) std::atof (argv[10])); engine.setUnison ((float) std::atof (argv[11])); }   // variacion entre notas y 2ª cuerda
 
     std::vector<Event> ev;
@@ -97,6 +122,11 @@ static int cmdRender (int argc, char** argv)
             const auto b0 = std::chrono::steady_clock::now();
             if (stereo) engine.renderStereo (out.data() + pos, outR.data() + pos, n);
             else        engine.render (out.data() + pos, n);
+            if (mechAmount > 0.f)
+            {
+                if (stereo) mech.render (out.data() + pos, outR.data() + pos, n);
+                else { mechR.assign ((size_t) n, 0.f); mech.render (out.data() + pos, mechR.data(), n); }
+            }
             if (n == blockSize) blockMs.push_back (std::chrono::duration<double, std::milli> (std::chrono::steady_clock::now() - b0).count());
             peakVoices = std::max (peakVoices, engine.numActiveVoices());
             pos += (size_t) n;
@@ -105,9 +135,14 @@ static int cmdRender (int argc, char** argv)
     for (auto& e : ev)
     {
         renderTo ((size_t) std::llround (e.t * sr));
-        if (e.type == 0) engine.noteOn (e.note, e.value);
-        else if (e.type == 1) engine.noteOff (e.note);
-        else engine.setSustain (e.value);
+        if (e.type == 0) { float vn, g; shaping.apply (e.note, e.value, vn, g); engine.noteOn (e.note, vn, g); mech.noteOn (e.note, e.value); }
+        else if (e.type == 1) { engine.noteOff (e.note); mech.noteOff (e.note); }
+        else
+        {
+            engine.setSustain (e.value);
+            const bool down = e.value >= 0.5f;
+            if (down != pedalWasDown) { mech.pedal (down); pedalWasDown = down; }
+        }
     }
     renderTo (total);
     const double secs = std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count();
